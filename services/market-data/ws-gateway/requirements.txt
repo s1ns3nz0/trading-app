@@ -1,0 +1,2 @@
+boto3==1.35.76
+redis[asyncio]==5.2.0

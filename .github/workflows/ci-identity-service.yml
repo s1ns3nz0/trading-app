@@ -1,0 +1,144 @@
+name: Identity Service CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/identity/**"
+      - "services/shared/lambda-authorizer/**"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/identity/**"
+
+env:
+  PYTHON_VERSION: "3.12"
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: trading-platform/identity-service
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: services/identity/requirements.txt
+
+      - name: Install dependencies
+        working-directory: services/identity
+        run: pip install -r requirements.txt pytest pytest-asyncio moto[dynamodb]
+
+      - name: Run tests
+        working-directory: services/identity
+        run: pytest tests/ -v --tb=short
+        env:
+          AWS_DEFAULT_REGION: ap-northeast-2
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+
+  build-push:
+    name: Build & Push Docker image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image-uri: ${{ steps.push.outputs.image-uri }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, push Docker image
+        id: push
+        working-directory: services/identity
+        run: |
+          IMAGE_TAG="${{ github.sha }}"
+          REGISTRY="${{ steps.ecr-login.outputs.registry }}"
+          IMAGE_URI="$REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+
+          # Also tag latest for the branch
+          BRANCH_TAG="${{ github.ref == 'refs/heads/main' && 'latest' || 'develop' }}"
+          docker tag "$IMAGE_URI" "$REGISTRY/${{ env.ECR_REPOSITORY }}:$BRANCH_TAG"
+          docker push "$REGISTRY/${{ env.ECR_REPOSITORY }}:$BRANCH_TAG"
+
+          echo "image-uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+  deploy-staging:
+    name: Deploy to Staging Lambda
+    runs-on: ubuntu-latest
+    needs: build-push
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_STAGING_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update Lambda function
+        run: |
+          aws lambda update-function-code \
+            --function-name trading-identity-staging \
+            --image-uri "${{ needs.build-push.outputs.image-uri }}" \
+            --region ${{ env.AWS_REGION }}
+
+  deploy-prod:
+    name: Deploy to Production Lambda
+    runs-on: ubuntu-latest
+    needs: build-push
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update Lambda function (Blue/Green via aliases)
+        run: |
+          # Update $LATEST
+          aws lambda update-function-code \
+            --function-name trading-identity-prod \
+            --image-uri "${{ needs.build-push.outputs.image-uri }}"
+
+          # Wait for update to complete
+          aws lambda wait function-updated \
+            --function-name trading-identity-prod
+
+          # Publish new version
+          VERSION=$(aws lambda publish-version \
+            --function-name trading-identity-prod \
+            --query Version --output text)
+
+          # Shift 10% traffic to new version (canary)
+          aws lambda update-alias \
+            --function-name trading-identity-prod \
+            --name live \
+            --routing-config "AdditionalVersionWeights={$VERSION=0.1}"

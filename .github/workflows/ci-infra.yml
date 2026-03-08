@@ -1,0 +1,155 @@
+name: Infrastructure CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "infra/**"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "infra/**"
+
+env:
+  TF_VERSION: "1.10.3"
+  AWS_REGION: ap-northeast-2
+
+jobs:
+  validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module:
+          - infra/org
+          - infra/modules/account-factory
+          - infra/modules/network
+          - infra/environments/prod/spot-trading
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: ${{ matrix.module }}
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+        working-directory: ${{ matrix.module }}
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: ${{ matrix.module }}
+
+  checkov:
+    name: Checkov Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra/
+          framework: terraform
+          quiet: true
+          soft_fail: false
+          skip_check: >-
+            CKV_AWS_116,
+            CKV_AWS_117
+
+  plan-prod:
+    name: Terraform Plan (prod/spot-trading)
+    runs-on: ubuntu-latest
+    needs: [validate, checkov]
+    if: github.event_name == 'pull_request'
+    environment: prod-plan
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: infra/environments/prod/spot-trading
+        run: terraform init
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: infra/environments/prod/spot-trading
+        run: |
+          terraform plan -no-color -out=tfplan \
+            -var="account_id=${{ secrets.SPOT_TRADING_PROD_ACCOUNT_ID }}" \
+            -var="org_id=${{ secrets.ORG_ID }}" \
+            -var="transit_gateway_id_prod=${{ secrets.TGW_PROD_ID }}" \
+            -var="log_archive_bucket=${{ secrets.LOG_ARCHIVE_BUCKET }}"
+        continue-on-error: true
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-prod-spot-trading
+          path: infra/environments/prod/spot-trading/tfplan
+          retention-days: 1
+
+      - name: Comment Plan on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const plan = `${{ steps.plan.outputs.stdout }}`.substring(0, 60000)
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform Plan — prod/spot-trading\n\`\`\`hcl\n${plan}\n\`\`\``
+            })
+
+  apply-prod:
+    name: Terraform Apply (prod/spot-trading)
+    runs-on: ubuntu-latest
+    needs: plan-prod
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: infra/environments/prod/spot-trading
+        run: terraform init
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-prod-spot-trading
+          path: infra/environments/prod/spot-trading
+
+      - name: Terraform Apply
+        working-directory: infra/environments/prod/spot-trading
+        run: terraform apply -auto-approve tfplan

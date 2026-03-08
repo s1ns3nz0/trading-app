@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+.next/
+dist/
+build/
+out/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+
+# Debug logs
+npm-debug.log*
+pnpm-debug.log*
+
+# bkit runtime/snapshots
+.bkit/runtime/
+.bkit/snapshots/

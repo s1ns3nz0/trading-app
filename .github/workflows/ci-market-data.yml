@@ -1,0 +1,175 @@
+name: CI — Market Data Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'services/market-data/**'
+      - '.github/workflows/ci-market-data.yml'
+  pull_request:
+    paths:
+      - 'services/market-data/**'
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-northeast-2.amazonaws.com
+
+jobs:
+  # ─── Lint + Test Ingester ─────────────────────────────────────────────────
+  test-ingester:
+    name: Test Ingester
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/market-data/ingester
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: services/market-data/ingester/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+        if: hashFiles('services/market-data/ingester/tests/**/*.py') != ''
+
+  # ─── Lint + Test Router ───────────────────────────────────────────────────
+  test-router:
+    name: Test Router
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/market-data/router
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: services/market-data/router/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+        if: hashFiles('services/market-data/router/tests/**/*.py') != ''
+
+  # ─── Lint + Test REST API ─────────────────────────────────────────────────
+  test-api:
+    name: Test REST API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/market-data/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: services/market-data/api/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio httpx
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+        if: hashFiles('services/market-data/api/tests/**/*.py') != ''
+
+  # ─── Terraform validate ───────────────────────────────────────────────────
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/market-data/infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.x'
+
+      - name: Terraform init (backend-config skipped for validation)
+        run: terraform init -backend=false
+
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Checkov IaC scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: services/market-data/infra
+          quiet: true
+          framework: terraform
+
+  # ─── Build + Push Docker images ───────────────────────────────────────────
+  build-push:
+    name: Build & Push — ${{ matrix.service }}
+    needs: [test-ingester, test-router, test-api, terraform-validate]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        service: [ingester, router, api]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: services/market-data/${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/market-data-${{ matrix.service }}:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/market-data-${{ matrix.service }}:latest
+
+  # ─── Deploy ECS (rolling update) ─────────────────────────────────────────
+  deploy-ecs:
+    name: Deploy ECS — ${{ matrix.service }}
+    needs: build-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    strategy:
+      matrix:
+        service: [ingester, router, api]
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Force new ECS deployment
+        run: |
+          aws ecs update-service \
+            --cluster market-data-prod \
+            --service market-data-${{ matrix.service }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Wait for deployment to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster market-data-prod \
+            --services market-data-${{ matrix.service }} \
+            --region ${{ env.AWS_REGION }}

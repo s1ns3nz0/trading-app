@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+:root {
+  --bg-primary: #0b0e11;
+  --bg-secondary: #161a1e;
+  --bg-tertiary: #1e2329;
+  --border: #2b3139;
+  --text-primary: #eaecef;
+  --text-secondary: #848e9c;
+  --text-muted: #5e6673;
+  --color-up: #02c076;
+  --color-down: #f6465d;
+  --color-accent: #f0b90b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3d4555;
+}
+
+/* Number inputs — remove spinners */
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+}

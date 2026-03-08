@@ -1,0 +1,81 @@
+{
+  "Comment": "Deposit confirmation workflow: CONFIRMING -> CONFIRMED -> CREDITED",
+  "StartAt": "WaitForConfirmations",
+  "States": {
+    "WaitForConfirmations": {
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "CheckConfirmations"
+    },
+    "CheckConfirmations": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${check_confirmations_fn_arn}",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.checkResult",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "MaxAttempts": 3,
+          "IntervalSeconds": 5
+        }
+      ],
+      "Next": "IsConfirmed"
+    },
+    "IsConfirmed": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.checkResult.Payload.confirmed",
+          "BooleanEquals": true,
+          "Next": "CreditBalance"
+        },
+        {
+          "Variable": "$.checkResult.Payload.failed",
+          "BooleanEquals": true,
+          "Next": "HandleFailure"
+        }
+      ],
+      "Default": "WaitForConfirmations"
+    },
+    "CreditBalance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${credit_balance_fn_arn}",
+        "Payload.$": "$"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "MaxAttempts": 3,
+          "IntervalSeconds": 10,
+          "BackoffRate": 2.0
+        }
+      ],
+      "ResultPath": "$.creditResult",
+      "Next": "PublishEvent"
+    },
+    "PublishEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${publish_event_fn_arn}",
+        "Payload.$": "$"
+      },
+      "End": true
+    },
+    "HandleFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${handle_failure_fn_arn}",
+        "Payload.$": "$"
+      },
+      "End": true
+    }
+  },
+  "TimeoutSeconds": 86400
+}

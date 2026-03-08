@@ -1,0 +1,104 @@
+{
+  "Comment": "Withdrawal execution workflow",
+  "StartAt": "ReserveBalance",
+  "States": {
+    "ReserveBalance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${reserve_balance_fn_arn}",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.reserveResult",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "MaxAttempts": 2,
+          "IntervalSeconds": 5
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "RejectWithdrawal",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "ValidateAML"
+    },
+    "ValidateAML": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${validate_aml_fn_arn}",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.amlResult",
+      "Next": "IsAMLPass"
+    },
+    "IsAMLPass": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.amlResult.Payload.pass",
+          "BooleanEquals": true,
+          "Next": "ExecuteWithdrawal"
+        }
+      ],
+      "Default": "RejectWithdrawal"
+    },
+    "ExecuteWithdrawal": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${execute_withdrawal_fn_arn}",
+        "Payload.$": "$"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "MaxAttempts": 3,
+          "IntervalSeconds": 10,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "FailWithdrawal",
+          "ResultPath": "$.error"
+        }
+      ],
+      "ResultPath": "$.executeResult",
+      "Next": "PublishEvent"
+    },
+    "PublishEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${publish_event_fn_arn}",
+        "Payload.$": "$"
+      },
+      "End": true
+    },
+    "RejectWithdrawal": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${reject_withdrawal_fn_arn}",
+        "Payload.$": "$"
+      },
+      "End": true
+    },
+    "FailWithdrawal": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${fail_withdrawal_fn_arn}",
+        "Payload.$": "$"
+      },
+      "End": true
+    }
+  },
+  "TimeoutSeconds": 86400
+}
