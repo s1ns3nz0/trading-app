@@ -30,7 +30,7 @@ locals {
 # ─── Account Factory (VPC, CloudTrail, GuardDuty, KMS, TGW attach) ───────────
 
 module "account" {
-  source = "../../../infra/modules/account-factory"
+  source = "git::https://github.com/s1ns3nz0/trading-infra.git//modules/account-factory?ref=main"
 
   account_name = "market-data-prod"
   environment  = "prod"
